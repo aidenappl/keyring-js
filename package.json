@@ -1,5 +1,5 @@
 {
-  "name": "@aidenappl/keyring",
+  "name": "@aidenappleby/keyring-js",
   "version": "1.0.0",
   "description": "Official JavaScript/TypeScript client for the Keyring API",
   "main": "dist/index.js",
