@@ -77,27 +77,33 @@ Package entry points (`package.json`):
 
 ## 3. Project structure
 
-The entire SDK is three source files under `src/`. Flat and small on purpose.
+The SDK is four source files under `src/`, plus co-located vitest suites. Flat and small on purpose.
 
 ```
 keyring-js/
   src/
-    index.ts     # Public entry — re-exports Client + errors, and the package-level
-                 #   convenience functions: load(), injectEnv(), get(), getOr()
-    client.ts    # The Client class — ClientOptions, config resolution, the GET /secrets
-                 #   call, load() / mustLoad() / injectEnv() / get() / getOr()
-    errors.ts    # Typed error hierarchy: KeyringError (base) + Unauthorized / Unavailable /
-                 #   MalformedResponse
+    index.ts        # Public entry — re-exports Client + errors + the resolve family, and the
+                    #   package-level convenience functions: load(), injectEnv(), get(),
+                    #   mustGet(), getOr()
+    client.ts       # The Client class — ClientOptions, config resolution, the GET /secrets
+                    #   call, load() / mustLoad() / injectEnv() / get() / getOr(); plus the
+                    #   internal readBodyCapped() byte-capped body reader
+    resolve.ts      # Env-first resolve family — envOnly(), lookup(), resolve(), mustResolve(),
+                    #   resolveOr(), and the SOURCE_ENV_VAR constant
+    errors.ts       # Typed error hierarchy: KeyringError (base) + Unauthorized / Unavailable /
+                    #   MalformedResponse
+    client.test.ts  # vitest — Client.load / constructor
+    resolve.test.ts # vitest — the resolve family
   tsup.config.ts # Build config (CJS+ESM+dts, clean, sourcemap)
   tsconfig.json  # strict, ES2022, bundler resolution
   package.json   # name, version, entry points, scripts
-  Devfile.yaml   # `dev` CLI command mappings (start/dev/test/lint/install)
-  README.md      # Front-door (currently a stub — see §11)
+  Devfile.yaml   # `dev` CLI command mappings (build/check/test/install)
+  README.md      # Front-door (standard SDK shape — install, quickstart, API surface)
 ```
 
-There is **no `dist/` in git** (built on publish), **no test files yet** despite the `test`
-script (see §4), and **no `.env`** (this SDK's config comes from the consuming service's
-environment).
+There is **no `dist/` in git** (built on publish) and **no `.env`** (this SDK's config comes from
+the consuming service's environment). Tests live in `src/*.test.ts` and are excluded from the tsup
+build (entry is `src/index.ts` only).
 
 ---
 
@@ -107,14 +113,13 @@ environment).
 npm ci            # install dev deps first — REQUIRED before check/build (see note below)
 npm run check     # tsc --noEmit   → typecheck only
 npm run build     # tsup           → dist/ (CJS index.js + ESM index.mjs + index.d.ts + maps)
-npm test          # vitest run     → currently no *.test.ts files exist yet (exits with none)
+npm test          # vitest run     → runs src/*.test.ts (client + resolve suites)
 ```
 
-`Devfile.yaml` maps the `dev` CLI: `dev` → `npm run dev`, `dev test` → `npm test`,
-`dev install` → `npm install`, `dev start` → `npm start`, `dev lint` → `npm run lint`. Note the
-Devfile references `dev`/`start`/`lint` scripts that are **not** defined in `package.json` — only
-`build`, `check`, `test`, and `prepublishOnly` exist. Use the `npm run` commands above directly;
-they are the source of truth.
+`Devfile.yaml` maps the `dev` CLI to the real npm scripts: `dev build` → `npm run build`,
+`dev check` → `npm run check`, `dev test` → `npm test`, `dev install` → `npm install`. (It was
+previously pointed at non-existent `dev`/`start`/`lint` scripts; it now mirrors `package.json`,
+which defines `build`, `check`, `test`, and `prepublishOnly`.)
 
 **⚠️ Typecheck requires deps installed.** `npm run check` on a fresh clone with no `node_modules`
 fails with `Cannot find name 'AbortSignal'` / `Buffer` etc. — those are Node globals that come
@@ -165,8 +170,8 @@ their values) are: `KEYRING_URL`, `KEYRING_ACCESS_KEY_ID`, `KEYRING_SECRET_ACCES
 
 | Method | Returns | Behaviour |
 |---|---|---|
-| `load(options?)` | `Promise<Record<string,string>>` | The core call. `GET {url}/secrets` with `Authorization: Basic base64(accessKeyId:secretAccessKey)`. Maps the returned `{data:[{key,value}]}` into a `Record` keyed by `key`. **Always a live HTTP call** — no caching; cache the map yourself if you need repeated access. |
-| `mustLoad()` | `Promise<Record<string,string>>` | Thin alias for `load()` with no abort signal (uses only the client default timeout). Naming mirrors `go-keyring`'s must-style API; it does not add extra throwing behaviour beyond `load`, which already rejects on failure. |
+| `load(options?)` | `Promise<Record<string,string>>` | The core call. `GET {url}/secrets` with `Authorization: Basic base64(accessKeyId:secretAccessKey)`. Reads the body **byte-capped** at 32 MiB (streamed via `readBodyCapped`), parses it, and — guarding that `.data` is actually an array — maps `{data:[{key,value}]}` into a `Record` keyed by `key`. A 2xx body missing/ non-array `.data` throws `MalformedResponseError` (not a raw `TypeError`). **Always a live HTTP call** — no caching; cache the map yourself if you need repeated access. |
+| `mustLoad()` | `Promise<Record<string,string>>` | Throw-on-failure startup variant of `load()` (no abort signal beyond the client default timeout). In go-keyring `Load` returns an error and `MustLoad` panics; in JS `load()` already *rejects* on failure, so `mustLoad()` throws under the same conditions and exists for naming parity + call-site intent. |
 | `injectEnv(options?)` | `Promise<void>` | Calls `load()`, writes every returned secret into `process.env`, and prints a sorted ASCII table of injected key **names** to stdout. Keys that replace a non-empty, different existing local value are tagged `(override)`. **The headline function.** |
 | `get(key, options?)` | `Promise<string>` | If `process.env[key]` is already set (non-empty), returns it immediately and logs that the keyring lookup was skipped — **local env wins**. Otherwise `load()`s and returns that key, throwing `keyring: secret "<key>" not found` if absent. |
 | `getOr(key, fallback, options?)` | `Promise<string>` | `get()` wrapped in try/catch — returns `fallback` on **any** error (missing key, unauthorized, unavailable). Never throws. |
@@ -174,16 +179,36 @@ their values) are: `KEYRING_URL`, `KEYRING_ACCESS_KEY_ID`, `KEYRING_SECRET_ACCES
 ### Package-level convenience functions (`index.ts`)
 
 Each constructs a fresh `Client(opts)` and delegates: `load(opts?, options?)`,
-`injectEnv(opts?, options?)`, `get(key, opts?, options?)`, `getOr(key, fallback, opts?, options?)`.
-The common startup call `await injectEnv()` therefore takes **no arguments** and reads everything
-from the environment.
+`injectEnv(opts?, options?)`, `get(key, opts?, options?)`, `mustGet(key, opts?, options?)`,
+`getOr(key, fallback, opts?, options?)`. The common startup call `await injectEnv()` therefore
+takes **no arguments** and reads everything from the environment. `mustGet` mirrors go-keyring's
+`MustGet` — it constructs a client and `get`s, throwing on absence/error (async here, so it
+*rejects* rather than panics).
+
+### Env-first resolve family (`resolve.ts`)
+
+Ported from go-keyring's `resolve.go`. **Resolution order: process env first** (a non-empty
+`process.env[key]` wins), then the Keyring API — unless `KEYRING_SOURCE=env`, which skips the API
+entirely. The **"empty string = not set"** rule is honoured: an empty env value falls through to
+the Keyring lookup. Unlike `get`, an unconfigured/unreachable Keyring is **not** an error here.
+
+| Function | Returns | Behaviour |
+|---|---|---|
+| `envOnly()` | `boolean` | `true` when `KEYRING_SOURCE=env` (case-insensitive) — the API is skipped. |
+| `lookup(key, opts?, options?)` | `Promise<[string, boolean]>` | `[value, found]`. Env first; then (unless envOnly) constructs a `Client` and `get`s. A Client that can't be constructed (unconfigured) or a failed `get` (unreachable/unauthorized/missing) → `["", false]`. **Never throws.** |
+| `resolve(key, opts?, options?)` | `Promise<string>` | `lookup`, else throws naming the key (and the `KEYRING_SOURCE=env` source when applicable). |
+| `mustResolve(key, opts?, options?)` | `Promise<string>` | Startup variant — throws when absent. Succeeds from env alone even if Keyring is down. **Async**, unlike go-keyring's sync `MustResolve` (which panics) — this rejects. |
+| `resolveOr(key, fallback, opts?, options?)` | `Promise<string>` | `lookup`, else `fallback`. **Never throws.** |
+| `SOURCE_ENV_VAR` | `string` | The `"KEYRING_SOURCE"` constant. |
 
 ### Exports (`index.ts`)
 
-- **Classes/values:** `Client`, `load`, `injectEnv`, `get`, `getOr`, plus the error classes
-  `KeyringError`, `UnauthorizedError`, `UnavailableError`, `MalformedResponseError`.
+- **Classes/values:** `Client`, `load`, `injectEnv`, `get`, `mustGet`, `getOr`; the resolve family
+  `envOnly`, `lookup`, `resolve`, `mustResolve`, `resolveOr`, `SOURCE_ENV_VAR`; and the error
+  classes `KeyringError`, `UnauthorizedError`, `UnavailableError`, `MalformedResponseError`.
 - **Types:** `ClientOptions`.
-- The `Secret` / `SecretsResponse` wire interfaces in `client.ts` are **internal** (not exported).
+- The `Secret` / `SecretsResponse` wire interfaces and `readBodyCapped` in `client.ts` are
+  **internal** (not exported).
 
 ### Conventions to keep
 
@@ -196,7 +221,12 @@ from the environment.
   never values. Preserve that. Same for any new code.
 - **Trailing slashes stripped** from `url` via `.replace(/\/+$/, "")` so `.../` + `/secrets`
   never doubles up.
-- **32 MiB response cap** (`MAX_RESPONSE_BYTES`) guards against a runaway body.
+- **32 MiB response cap** (`MAX_RESPONSE_BYTES`) guards against a runaway body. Enforced as a
+  **real byte cap** by `readBodyCapped()` — it checks `Content-Length` up front, then streams the
+  body via `response.body.getReader()`, counting bytes and aborting the read once the budget is
+  exceeded (mirroring go-keyring's `io.LimitReader` intent). It does **not** buffer the whole body
+  and then measure `String.length` — that old check counted UTF-16 units *after* the full read and
+  never actually capped anything.
 
 ---
 
@@ -225,7 +255,7 @@ This is the single integration point and must stay in lockstep with
 | `fetch` rejects (network down, DNS, timeout via `AbortSignal.timeout`) | `UnavailableError` (with `.cause`) |
 | HTTP `401` or `403` | `UnauthorizedError` — credentials invalid or token inactive/ungranted |
 | Any other non-2xx | `MalformedResponseError("unexpected status <n>")` |
-| Body unparseable, or `> 32 MiB` | `MalformedResponseError(detail)` |
+| Body unparseable, 2xx body missing/non-array `.data`, or `> 32 MiB` (byte-capped during read) | `MalformedResponseError(detail)` |
 
 All four extend `KeyringError`, so a caller can `catch (e) { if (e instanceof KeyringError) … }`.
 `getOr` catches all of them and returns its fallback.
@@ -323,7 +353,7 @@ win and because you can simply not call `injectEnv()`.
 npm ci            # REQUIRED first on a fresh clone (types come from @types/node)
 npm run check     # tsc --noEmit — must be clean
 npm run build     # tsup — must produce dist/{index.js,index.mjs,index.d.ts}
-npm test          # vitest run (no test files yet — will report none; still must not error)
+npm test          # vitest run — runs src/*.test.ts (client + resolve suites); must pass
 ```
 
 A clone with no `node_modules` will show spurious `Cannot find name 'AbortSignal'/'Buffer'`
@@ -349,7 +379,8 @@ Update this AGENTS.md **in the same change** when you:
 - **Change failure behaviour / the error hierarchy** → update §6's failure table.
 - **Change the build** (tsup format, entry, output filenames) or the package entry points →
   update §2 and §4, and keep `package.json` in sync.
-- **Add tests** → update §3/§4 (the "no test files yet" notes).
+- **Add tests** → update §3/§4 (keep the test-layout description current).
 
-`README.md` is currently a stub (just the title). When consumer-facing usage stabilises, flesh it
-out to the standard front-door shape and keep it in sync with §5's usage examples.
+`README.md` is the standard front-door (install, `injectEnv()` quickstart, the full API surface —
+Client methods, the resolve family, errors, env vars, the keys-vs-keyring hostname note). Keep it
+in sync with §5's surface tables whenever the exported API changes.

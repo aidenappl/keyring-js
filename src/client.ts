@@ -7,6 +7,55 @@ import {
 /** Maximum response bytes to read (32 MiB). */
 const MAX_RESPONSE_BYTES = 32 << 20;
 
+/**
+ * Reads a response body as text while enforcing a hard byte cap, mirroring
+ * go-keyring's `io.LimitReader` intent. The body is streamed and byte-counted;
+ * if it exceeds `maxBytes` the read is aborted and a MalformedResponseError is
+ * thrown (rather than buffering the whole body first, which the old
+ * `text().length` check never actually prevented — `.length` counts UTF-16
+ * code units, not bytes, and only after the entire body was already read).
+ *
+ * `Content-Length` (when present and trustworthy) short-circuits before any
+ * bytes are read; the streaming counter is the real enforcement.
+ */
+async function readBodyCapped(
+    response: Response,
+    maxBytes: number
+): Promise<string> {
+    const declared = Number(response.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > maxBytes) {
+        throw new MalformedResponseError("response body too large");
+    }
+
+    const body = response.body;
+    if (!body) {
+        // No readable stream (unusual on Node ≥18) — fall back to text() and
+        // enforce the cap on the decoded byte length.
+        const text = await response.text();
+        if (Buffer.byteLength(text) > maxBytes) {
+            throw new MalformedResponseError("response body too large");
+        }
+        return text;
+    }
+
+    const reader = body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+            total += value.byteLength;
+            if (total > maxBytes) {
+                await reader.cancel();
+                throw new MalformedResponseError("response body too large");
+            }
+            chunks.push(value);
+        }
+    }
+    return Buffer.concat(chunks).toString("utf-8");
+}
+
 /** Options for configuring a Keyring Client. */
 export interface ClientOptions {
     /** Base URL of the Keyring API. Trailing slashes are stripped. */
@@ -104,31 +153,42 @@ export class Client {
             );
         }
 
-        let payload: SecretsResponse;
         try {
-            const text = await response.text();
-            if (text.length > MAX_RESPONSE_BYTES) {
-                throw new MalformedResponseError("response body too large");
+            const text = await readBodyCapped(response, MAX_RESPONSE_BYTES);
+            const payload = JSON.parse(text) as SecretsResponse;
+            // A 2xx body can be valid JSON yet lack `data` (e.g. `{}` or an
+            // error envelope). Guard here so this surfaces as a typed
+            // MalformedResponseError rather than a raw TypeError from
+            // iterating `undefined`.
+            if (!Array.isArray(payload.data)) {
+                throw new MalformedResponseError(
+                    "response missing data array"
+                );
             }
-            payload = JSON.parse(text) as SecretsResponse;
+            const result: Record<string, string> = {};
+            for (const s of payload.data) {
+                result[s.key] = s.value;
+            }
+            return result;
         } catch (err: unknown) {
             if (err instanceof MalformedResponseError) throw err;
             throw new MalformedResponseError(
                 err instanceof Error ? err.message : String(err)
             );
         }
-
-        const result: Record<string, string> = {};
-        for (const s of payload.data) {
-            result[s.key] = s.value;
-        }
-        return result;
     }
 
     /**
-     * Calls load() and throws (rejects) if an error occurs. Intended for use
-     * during service startup where a missing secret is a fatal condition.
-     * Uses no abort signal timeout beyond the client default.
+     * Throw-on-failure variant of load(), for service startup where a missing
+     * or unreachable Keyring is fatal. It awaits load() and lets any
+     * KeyringError propagate (reject) to the caller.
+     *
+     * Note on parity: in go-keyring, `Load` returns an `error` and `MustLoad`
+     * upgrades that to a panic. In JavaScript, load() already *rejects* on
+     * failure (there is no error-return channel), so mustLoad() and load()
+     * throw under the same conditions. mustLoad() exists for naming parity and
+     * to make the "this is the startup, fail-hard call" intent explicit at the
+     * call site. Uses no abort signal beyond the client default timeout.
      */
     async mustLoad(): Promise<Record<string, string>> {
         return this.load();

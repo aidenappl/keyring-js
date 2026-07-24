@@ -5,6 +5,14 @@ export {
     UnavailableError,
     MalformedResponseError,
 } from "./errors";
+export {
+    SOURCE_ENV_VAR,
+    envOnly,
+    lookup,
+    resolve,
+    mustResolve,
+    resolveOr,
+} from "./resolve";
 
 import { Client, ClientOptions } from "./client";
 
@@ -39,6 +47,24 @@ export async function injectEnv(
  * hitting the API.
  */
 export async function get(
+    key: string,
+    opts?: ClientOptions,
+    options?: { signal?: AbortSignal }
+): Promise<string> {
+    const client = new Client(opts);
+    return client.get(key, options);
+}
+
+/**
+ * Package-level convenience — creates a client from environment variables
+ * (or the provided options) and returns the value for a single key, throwing
+ * if the key is absent or any error occurs. Mirrors go-keyring's `MustGet`
+ * (which panics); this async port rejects instead.
+ *
+ * Prefer {@link mustResolve} at startup: unlike mustGet(), it succeeds from the
+ * environment alone even when the Keyring API is unconfigured or unreachable.
+ */
+export async function mustGet(
     key: string,
     opts?: ClientOptions,
     options?: { signal?: AbortSignal }

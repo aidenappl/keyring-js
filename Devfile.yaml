@@ -1,19 +1,15 @@
 commands:
-    - name: start
-      description: Start the application
-      run: npm start
+    - name: build
+      description: Build the package (tsup → dist/)
+      run: npm run build
       syncAfter: false
-    - name: dev
-      description: Start development server
-      run: npm run dev
+    - name: check
+      description: Typecheck (tsc --noEmit)
+      run: npm run check
       syncAfter: false
     - name: test
-      description: Run tests
+      description: Run tests (vitest run)
       run: npm test
-      syncAfter: false
-    - name: lint
-      description: Run linter
-      run: npm run lint
       syncAfter: false
     - name: install
       description: Install dependencies
