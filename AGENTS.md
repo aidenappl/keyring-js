@@ -142,8 +142,9 @@ There is no server to deploy; **the npm package is the deployment.** `prepublish
   version immediately affects every service that reinstalls or has a `^` range and re-resolves.
 - **Bump `version` in `package.json`** for any published change (npm rejects a duplicate version).
 - Publishing requires npm auth / **2FA** from an interactive terminal — an agent cannot publish
-  unattended, and per the repo guardrails you should **never publish/deploy** unless explicitly
-  asked. A running service does **not** pick up a new SDK version until it reinstalls and restarts.
+  unattended, and per the global guardrails you publish/deploy **only after asking Aiden and
+  getting an explicit yes** for that specific version. A running service does **not** pick up a
+  new SDK version until it reinstalls and restarts.
 
 ---
 
@@ -340,8 +341,10 @@ win and because you can simply not call `injectEnv()`.
   reject on failure; only `getOr` swallows. Don't silently degrade the others.
 - **Bump `package.json` version** for any change you intend to publish; keep the tsup output
   filenames aligned with the `main`/`module`/`types`/`exports` fields.
-- **Do not publish/deploy** unless the user explicitly asks (repo-wide guardrail). Publishing is
-  irreversible-ish and hits every consumer.
+- **Publish/deploy (and commit, push, merge) only after asking Aiden and getting an explicit yes**
+  for that specific action (see `~/CLAUDE.md` *Ask-first actions*). Publishing is
+  irreversible-ish and hits every consumer. **Never** amend, rebase, force-push, or run
+  destructive git ops.
 - **Stay Node-targeted** — don't add browser-only assumptions; it depends on `Buffer` /
   `AbortSignal.timeout` / global `fetch`.
 
