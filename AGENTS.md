@@ -42,7 +42,7 @@ and this SDK writes each one into `process.env`. From then on the rest of the co
 `process.env.FOO` as if it had been set natively.
 
 The GitHub repo is `github.com/aidenappl/keyring-js` (owner `aidenappl`). Local clone lives at
-`/Users/aiden/Desktop/Personal/Repos/keyring-js`.
+`/Users/aiden/Repos/Personal/keyring-js`.
 
 **What it is not:** it is not an admin client. It cannot create/update/delete secrets, manage
 grants, mint tokens, or read the encryption key. All of that is Forta-authenticated admin surface
